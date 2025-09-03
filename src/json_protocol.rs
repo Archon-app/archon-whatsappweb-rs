@@ -2,10 +2,14 @@ use std::str::FromStr;
 
 use json::JsonValue;
 use base64;
+use base64::Engine;
 
 use super::{Jid, PresenceStatus, GroupMetadata, GroupParticipantsChange, MediaType};
-use message::MessageAckLevel;
-use errors::*;
+use crate::message::MessageAckLevel;
+use crate::errors::*;
+
+// Define a type alias to simplify Result type
+type Result<T> = std::result::Result<T, Error>;
 
 
 #[derive(Debug)]
@@ -43,7 +47,8 @@ impl<'a> ServerMessage<'a> {
                 let cmd_type = payload.get_str("type")?;
                 match cmd_type {
                     "challenge" => {
-                        ServerMessage::ChallengeRequest(base64::decode(&payload.get_str("challenge")?)?)
+                                                 ServerMessage::ChallengeRequest(base64::engine::general_purpose::STANDARD.decode(&payload.get_str("challenge")?)?)
+
                     }
                     "disconnect" => {
                         ServerMessage::Disconnect(payload["kind"].as_str())
@@ -230,7 +235,7 @@ pub fn build_takeover_request(client_token: &str, server_token: &str, client_id:
 }
 
 pub fn build_challenge_response(server_token: &str, client_id: &str, signature: &[u8]) -> JsonValue {
-    array!["admin","challenge", base64::encode(&signature), server_token, client_id]
+    array!["admin","challenge", base64::engine::general_purpose::STANDARD.encode(&signature), server_token, client_id]
 }
 
 pub fn build_presence_subscribe(jid: &Jid) -> JsonValue {
@@ -243,7 +248,7 @@ pub fn build_file_upload_request(hash: &[u8], media_type: MediaType) -> JsonValu
         MediaType::Video => "video",
         MediaType::Audio => "audio",
         MediaType::Document => "document",
-    }, base64::encode(hash)]
+    }, base64::engine::general_purpose::STANDARD.encode(hash)]
 }
 
 pub fn parse_file_upload_response<'a>(response: &'a JsonValue) -> Result<&'a str> {

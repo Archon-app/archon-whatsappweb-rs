@@ -9,8 +9,7 @@ extern crate reqwest;
 extern crate base64;
 
 use std::fs::{File, OpenOptions, remove_file};
-use std::io::{Read, Write, Cursor};
-use std::sync::{RwLock, Arc};
+use std::io::{Read, Write};
 use std::str::FromStr;
 
 
@@ -33,7 +32,8 @@ impl WhatsappWebHandler for Handler {
     }
 
     fn on_persistent_session_data_changed(&self, persistent_session: PersistentSession) {
-        bincode::serialize_into(OpenOptions::new().create(true).write(true).open(SESSION_FILENAME).unwrap(), &persistent_session).unwrap();
+        let file = OpenOptions::new().create(true).write(true).open(SESSION_FILENAME).unwrap();
+        bincode::serialize_into(file, &persistent_session).unwrap();
     }
     fn on_user_data_changed(&self, connection: &WhatsappWebConnection<Handler>, user_data: UserData) {
         info!("userdata changed: {:?}", user_data);
@@ -54,7 +54,9 @@ impl WhatsappWebHandler for Handler {
 
         let message = *message;
 
-        let accepted_jid = Jid::from_str("491234567@c.us").unwrap();
+        // This is your WhatsApp number in international format without the + sign
+        // For example, for +1 555 123 4567, use "15551234567@c.us"
+        let accepted_jid = Jid::from_str("919967359329@c.us").unwrap(); // Change this to your actual number
 
         let peer = match message.direction {
             Direction::Receiving(peer) => peer,
@@ -82,7 +84,8 @@ fn main() {
     let handler = Handler {};
 
     if let Ok(file) = File::open(SESSION_FILENAME) {
-        let (_, join_handle) = whatsappweb::connection::with_persistent_session(bincode::deserialize_from(file).unwrap(), handler);
+        let session: PersistentSession = bincode::deserialize_from(file).unwrap();
+        let (_, join_handle) = whatsappweb::connection::with_persistent_session(session, handler);
         join_handle.join().unwrap();
     } else {
         let (_, join_handle) = whatsappweb::connection::new(|qr| { qr.render::<Luma<u8>>().module_dimensions(10, 10).build().save("login_qr.png").unwrap(); }, handler);

@@ -1,14 +1,19 @@
 extern crate crypto;
 
 use ring;
-use ring::{agreement, rand, hkdf, hmac, digest};
+use ring::{agreement, rand, digest};
 use ring::rand::{SystemRandom, SecureRandom};
 use self::crypto::{aes, blockmodes};
 use self::crypto::buffer::{RefWriteBuffer, RefReadBuffer, WriteBuffer};
-use untrusted;
+// Updated imports for ring 0.17+
+use ring::hmac::{self, Key as HmacKey, Tag as HmacTag};
+use ring::hkdf::{self, HKDF_SHA256, KeyType};
 
-use MediaType;
-use errors::*;
+// Define a type alias to simplify Result type
+type Result<T> = std::result::Result<T, Error>;
+
+use crate::MediaType;
+use crate::errors::*;
 
 pub(crate) fn generate_keypair() -> (agreement::EphemeralPrivateKey, Vec<u8>) {
     let rng = rand::SystemRandom::new();
@@ -16,30 +21,43 @@ pub(crate) fn generate_keypair() -> (agreement::EphemeralPrivateKey, Vec<u8>) {
     let my_private_key =
         agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng).unwrap();
 
-    let mut my_public_key = vec![0u8; my_private_key.public_key_len()];
-    my_private_key.compute_public_key(&mut my_public_key).unwrap();
+    // In the updated ring API, compute_public_key() returns a PublicKey
+    let public_key = my_private_key.compute_public_key().unwrap();
+    let my_public_key = public_key.as_ref().to_vec();
 
     (my_private_key, my_public_key)
 }
 
 pub(crate) fn calculate_secret_keys(secret: &[u8], private_key: agreement::EphemeralPrivateKey) -> Result<([u8; 32], [u8; 32])> {
-    let peer_public_key_alg = &agreement::X25519;
+    // Create an UnparsedPublicKey from the raw bytes
+    let peer_public_key = agreement::UnparsedPublicKey::new(&agreement::X25519, &secret[..32]);
 
-    let public_key = untrusted::Input::from(&secret[..32]);
-
-
-    let secret_key = agreement::agree_ephemeral(private_key, peer_public_key_alg,
-                                                public_key, ring::error::Unspecified,
-                                                |key_material| {
-                                                    Ok(Vec::from(key_material))
-                                                }).unwrap();
+    // Use the new API for agreement and explicitly annotate the type
+    let secret_key_vec: Vec<u8> = agreement::agree_ephemeral(
+        private_key,
+        &peer_public_key,
+        |key_material| Vec::from(key_material)
+    ).map_err(|_| Error::from_kind(ErrorKind::Msg("Key agreement failed".to_string())))?;
+    
     let mut secret_key_expanded = [0u8; 80];
 
-    hkdf::extract_and_expand(&hmac::SigningKey::new(&digest::SHA256, &[0u8; 32]), &secret_key, &[], &mut secret_key_expanded);
+    let salt = hkdf::Salt::new(HKDF_SHA256, &[0u8; 32]);
+    let prk = salt.extract(&secret_key_vec);
+    
+    // Use empty slice for info
+    let info: &[&[u8]] = &[];
+    let okm = prk.expand(info, HKDF_SHA256)
+        .map_err(|_| Error::from_kind(ErrorKind::Msg("HKDF expand failed".to_string())))?;
+    
+    // Fill the output buffer
+    okm.fill(&mut secret_key_expanded)
+        .map_err(|_| Error::from_kind(ErrorKind::Msg("HKDF fill failed".to_string())))?;
 
     let signature = [&secret[..32], &secret[64..]].concat();
 
-    hmac::verify(&hmac::VerificationKey::new(&digest::SHA256, &secret_key_expanded[32..64]), &signature, &secret[32..64]).chain_err(|| "Invalid mac")?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &secret_key_expanded[32..64]);
+    hmac::verify(&key, &signature, &secret[32..64])
+        .map_err(|_| Error::from_kind(ErrorKind::Msg("Invalid mac".to_string())))?;
 
     let mut buffer = [0u8; 64];
 
@@ -56,8 +74,9 @@ pub(crate) fn calculate_secret_keys(secret: &[u8], private_key: agreement::Ephem
 }
 
 pub fn verify_and_decrypt_message(enc: &[u8], mac: &[u8], message_encrypted: &[u8]) -> Result<Vec<u8>> {
-    hmac::verify(&hmac::VerificationKey::new(&digest::SHA256, &mac),
-                 &message_encrypted[32..], &message_encrypted[..32]).chain_err(|| "Invalid mac")?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &mac);
+    hmac::verify(&key, &message_encrypted[32..], &message_encrypted[..32])
+        .map_err(|_| Error::from_kind(ErrorKind::Msg("Invalid mac".to_string())))?;
 
     let mut message = vec![0u8; message_encrypted.len() - 48];
 
@@ -78,25 +97,35 @@ pub(crate) fn sign_and_encrypt_message(enc: &[u8], mac: &[u8], message: &[u8]) -
 
     message_encrypted[32..48].clone_from_slice(&iv);
 
-    let signature = hmac::sign(&hmac::SigningKey::new(&digest::SHA256, &mac),
-                               &message_encrypted[32..]);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &mac);
+    let tag = hmac::sign(&key, &message_encrypted[32..]);
 
-    message_encrypted[0..32].clone_from_slice(signature.as_ref());
+    message_encrypted[0..32].clone_from_slice(tag.as_ref());
     message_encrypted
 }
 
-pub(crate) fn sign_challenge(mac: &[u8], challenge: &[u8]) -> hmac::Signature {
-    hmac::sign(&hmac::SigningKey::new(&digest::SHA256, &mac), &challenge)
+pub(crate) fn sign_challenge(mac: &[u8], challenge: &[u8]) -> HmacTag {
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &mac);
+    hmac::sign(&key, &challenge)
 }
 
 fn derive_media_keys(key: &[u8], media_type: MediaType) -> [u8; 112] {
     let mut media_key_expanded = [0u8; 112];
-    hkdf::extract_and_expand(&hmac::SigningKey::new(&digest::SHA256, &[0u8; 32]), key, match media_type {
-        MediaType::Image => b"WhatsApp Image Keys",
-        MediaType::Video => b"WhatsApp Video Keys",
-        MediaType::Audio => b"WhatsApp Audio Keys",
-        MediaType::Document => b"WhatsApp Document Keys",
-    }, &mut media_key_expanded);
+    // Use a consistent string length for all media types
+    let info = match media_type {
+        MediaType::Image => b"WhatsApp Image Keys".as_ref(),
+        MediaType::Video => b"WhatsApp Video Keys".as_ref(),
+        MediaType::Audio => b"WhatsApp Audio Keys".as_ref(),
+        MediaType::Document => b"WhatsApp Document Keys".as_ref(),
+    };
+    let salt = hkdf::Salt::new(HKDF_SHA256, &[0u8; 32]);
+    let prk = salt.extract(key);
+    
+    // Convert info bytes to required format for expand
+    let info_slice: &[&[u8]] = &[info];
+    
+    let okm = prk.expand(info_slice, HKDF_SHA256).expect("HKDF expand failed");
+    okm.fill(&mut media_key_expanded).expect("HKDF fill failed");
     media_key_expanded
 }
 
@@ -124,10 +153,10 @@ pub fn encrypt_media_message(media_type: MediaType, file: &[u8]) -> (Vec<u8>, Ve
 
     let hmac_data = [iv, &file_encrypted].concat();
 
-    let signature = hmac::sign(&hmac::SigningKey::new(&digest::SHA256, &media_key_expanded[48..80]),
-                               &hmac_data);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &media_key_expanded[48..80]);
+    let tag = hmac::sign(&key, &hmac_data);
 
-    file_encrypted.extend_from_slice(&signature.as_ref()[0..10]);
+    file_encrypted.extend_from_slice(&tag.as_ref()[0..10]);
     (file_encrypted, media_key)
 }
 
@@ -143,10 +172,10 @@ pub fn decrypt_media_message(key: &[u8], media_type: MediaType, file_encrypted: 
 
     let hmac_data = [&media_key_expanded[0..16], &file_encrypted[..size - 10]].concat();
 
-    let signature = hmac::sign(&hmac::SigningKey::new(&digest::SHA256, &media_key_expanded[48..80]),
-                               &hmac_data);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &media_key_expanded[48..80]);
+    let tag = hmac::sign(&key, &hmac_data);
 
-    if file_encrypted[(size - 10)..] != signature.as_ref()[..10] {
+    if file_encrypted[(size - 10)..] != tag.as_ref()[..10] {
         bail! {"Invalid mac"}
     }
 

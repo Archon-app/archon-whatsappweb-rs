@@ -11,7 +11,7 @@ error_chain! {
         foreign_links {
             Io(io::Error);
             Websocket(ws::Error);
-            Crypto(ring::error::Unspecified);
+            // Remove ring error since it doesn't implement StdError
             Reqwest(reqwest::Error) #[cfg(feature = "media")];
             Json(json::Error);
             Base64(base64::DecodeError);

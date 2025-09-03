@@ -21,6 +21,9 @@ extern crate error_chain;
 #[cfg(feature = "media")]
 extern crate reqwest;
 
+// Import base64 Engine trait
+use base64::Engine;
+
 pub mod connection;
 pub mod message;
 #[cfg(feature = "media")]
@@ -36,7 +39,7 @@ pub mod errors;
 
 use std::str::FromStr;
 
-use errors::*;
+use crate::errors::*;
 
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]

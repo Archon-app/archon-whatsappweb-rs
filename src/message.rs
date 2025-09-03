@@ -6,9 +6,12 @@ use chrono::NaiveDateTime;
 use protobuf::Message;
 use ring::rand::{SystemRandom, SecureRandom};
 
-use super::message_wire;
-use super::Jid;
-use errors::*;
+use crate::message_wire;
+use crate::Jid;
+use crate::errors::*;
+
+// Define a type alias to simplify Result type
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, PartialOrd, PartialEq)]
 pub struct MessageId(pub String);
@@ -227,7 +230,7 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn from_proto_binary(content: &[u8]) -> Result<ChatMessage> {
-        let webmessage = protobuf::parse_from_bytes::<message_wire::WebMessageInfo>(content).chain_err(|| "Invalid Protobuf chatmessage")?;
+        let webmessage = message_wire::WebMessageInfo::parse_from_bytes(content).chain_err(|| "Invalid Protobuf chatmessage")?;
         ChatMessage::from_proto(webmessage)
     }
 
@@ -263,7 +266,8 @@ impl ChatMessage {
         }
         webmessage.set_key(key);
 
-        webmessage.set_messageTimestamp(self.time.timestamp() as u64);
+        // Convert to timestamp using the new API
+        webmessage.set_messageTimestamp(self.time.and_utc().timestamp() as u64);
 
         webmessage.set_message(self.content.into_proto());
 
